@@ -1,0 +1,471 @@
+--// RGT AutoClicker
+--// Opsi 1: klik otomatis ke tiap penanda (maks 10), jumlah klik & delay bisa diatur.
+--// Opsi 2: Put & Click -> Start, tekan [2] = klik semua penanda, tekan [1] = auto click
+--//         di posisi mouse selama durasi yang diatur. Ulang terus sampai Stop.
+--// Hook: script.AutoClick (BindableEvent) di-Fire tiap klik: (screenPos, hitInstance, hitPosition)
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+local MAX_MARKERS = 10
+
+local config = { mode = 1, clicks = 5, delay = 0.1, rounds = 1, duration = 10 }
+
+local env = getfenv()
+local fireSignal = env.firesignal
+local fireClickDetector = env.fireclickdetector
+
+local clickEvent = Instance.new("BindableEvent")
+clickEvent.Name = "AutoClick"
+clickEvent.Parent = script
+
+-- ============ GUI ============
+local gui = Instance.new("ScreenGui")
+gui.Name = "RGT_AutoClicker"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 100
+gui.Parent = player:WaitForChild("PlayerGui")
+
+-- Gaya UI mengikuti PlayerUtilityPanel (tema Merah: panel gelap + tombol gradient merah)
+local rgb = Color3.fromRGB
+local FONT = Enum.Font.MontserratBold
+local FONT_REGULAR = Enum.Font.Montserrat
+local PAL = {
+	Bg = rgb(29, 7, 8),
+	Bar = rgb(37, 6, 8),
+	Input = rgb(44, 6, 8),
+	Stroke = rgb(148, 0, 0),
+	Text = rgb(255, 238, 238),
+	Muted = rgb(255, 170, 170),
+}
+local function seq3(a, b, c)
+	return ColorSequence.new({
+		ColorSequenceKeypoint.new(0, a),
+		ColorSequenceKeypoint.new(0.38, b),
+		ColorSequenceKeypoint.new(1, c),
+	})
+end
+local GRAD = {
+	Primary = seq3(rgb(255, 0, 0), rgb(255, 53, 26), rgb(185, 0, 0)),
+	Green = seq3(rgb(0, 221, 0), rgb(64, 185, 50), rgb(39, 104, 32)),
+	Danger = seq3(rgb(110, 0, 0), rgb(95, 0, 0), rgb(65, 0, 0)),
+	Off = seq3(rgb(70, 6, 8), rgb(60, 6, 8), rgb(45, 6, 8)),
+}
+
+local function corner(o, r)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 8)
+	c.Parent = o
+end
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.fromOffset(240, 360)
+panel.Position = UDim2.fromOffset(10, 10)
+panel.BackgroundColor3 = PAL.Bg
+panel.BorderSizePixel = 0
+panel.Active = true
+panel.Parent = gui
+corner(panel, 12)
+do
+	local s = Instance.new("UIStroke")
+	s.Color = PAL.Stroke
+	s.Thickness = 1.5
+	s.Parent = panel
+end
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 5)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = panel
+local pad = Instance.new("UIPadding")
+pad.PaddingTop, pad.PaddingLeft, pad.PaddingRight, pad.PaddingBottom =
+	UDim.new(0, 8), UDim.new(0, 8), UDim.new(0, 8), UDim.new(0, 8)
+pad.Parent = panel
+
+local order = 0
+local function nextOrder()
+	order += 1
+	return order
+end
+
+local function setBtnGradient(b, seq)
+	b:FindFirstChildOfClass("UIGradient").Color = seq
+end
+
+local function makeButton(text, seq)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(1, 0, 0, 30)
+	b.BackgroundColor3 = Color3.new(1, 1, 1)
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Font = FONT
+	b.TextSize = 13
+	b.Text = text
+	b.AutoButtonColor = false
+	b.LayoutOrder = nextOrder()
+	b.Parent = panel
+	corner(b, 8)
+	local g = Instance.new("UIGradient")
+	g.Rotation = 90
+	g.Color = seq or GRAD.Primary
+	g.Parent = b
+	b.MouseEnter:Connect(function()
+		b.BackgroundColor3 = rgb(225, 225, 225)
+	end)
+	b.MouseLeave:Connect(function()
+		b.BackgroundColor3 = Color3.new(1, 1, 1)
+	end)
+	return b
+end
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 22)
+title.BackgroundTransparency = 1
+title.Font = FONT
+title.TextSize = 16
+title.TextColor3 = PAL.Text
+title.Text = "RGT Auto Clicker"
+title.LayoutOrder = nextOrder()
+title.Parent = panel
+
+-- drag panel lewat judul
+do
+	local dragging, startPos, startInput
+	title.Active = true
+	title.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging, startPos, startInput = true, panel.Position, i.Position
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local d = i.Position - startInput
+			panel.Position = UDim2.fromOffset(startPos.X.Offset + d.X, startPos.Y.Offset + d.Y)
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+end
+
+local modeBtn = makeButton("Mode: Opsi 1 (Auto klik penanda)", GRAD.Primary)
+
+local function makeField(label, key, default, min, max)
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 26)
+	row.BackgroundTransparency = 1
+	row.LayoutOrder = nextOrder()
+	row.Parent = panel
+	local l = Instance.new("TextLabel")
+	l.Size = UDim2.new(0.62, 0, 1, 0)
+	l.BackgroundTransparency = 1
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.Font = FONT_REGULAR
+	l.TextSize = 13
+	l.TextColor3 = PAL.Text
+	l.Text = label
+	l.Parent = row
+	local tb = Instance.new("TextBox")
+	tb.Size = UDim2.new(0.38, 0, 1, 0)
+	tb.Position = UDim2.fromScale(0.62, 0)
+	tb.BackgroundColor3 = PAL.Input
+	tb.TextColor3 = PAL.Text
+	tb.Font = FONT
+	tb.TextSize = 13
+	tb.ClearTextOnFocus = false
+	tb.Text = tostring(default)
+	tb.Parent = row
+	corner(tb, 6)
+	do
+		local s = Instance.new("UIStroke")
+		s.Color = PAL.Stroke
+		s.Thickness = 1
+		s.Parent = tb
+	end
+	tb.FocusLost:Connect(function()
+		local n = tonumber(tb.Text)
+		if n then
+			config[key] = math.clamp(n, min, max)
+		end
+		tb.Text = tostring(config[key])
+	end)
+	return row
+end
+
+makeField("Klik per penanda", "clicks", config.clicks, 1, 10000)
+makeField("Delay klik (detik)", "delay", config.delay, 0.01, 60)
+local roundsRow = makeField("Putaran (0 = terus)", "rounds", config.rounds, 0, 100000)
+local durRow = makeField("Durasi auto klik (dtk)", "duration", config.duration, 0.1, 100000)
+durRow.Visible = false
+
+local addBtn = makeButton("+ Tambah penanda (0/" .. MAX_MARKERS .. ")", GRAD.Primary)
+local delBtn = makeButton("- Hapus penanda terakhir", GRAD.Off)
+local startBtn = makeButton("START", GRAD.Green)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, 0, 0, 36)
+status.BackgroundTransparency = 1
+status.TextWrapped = true
+status.Font = FONT_REGULAR
+status.TextSize = 12
+status.TextColor3 = PAL.Muted
+status.Text = "Siap. Tambah penanda lalu geser ke tempat klik."
+status.LayoutOrder = nextOrder()
+status.Parent = panel
+
+-- ============ MARKERS ============
+local markers = {}
+
+local function refreshAddText()
+	addBtn.Text = "+ Tambah penanda (" .. #markers .. "/" .. MAX_MARKERS .. ")"
+end
+
+local function addMarker()
+	if #markers >= MAX_MARKERS then
+		status.Text = "Maksimal " .. MAX_MARKERS .. " penanda."
+		return
+	end
+	local idx = #markers + 1
+	local m = Instance.new("ImageLabel")
+	m.Name = "Marker" .. idx
+	m.Size = UDim2.fromOffset(40, 40)
+	m.Position = UDim2.fromOffset(300 + idx * 20, 120 + idx * 20)
+	m.BackgroundColor3 = rgb(255, 40, 30)
+	m.BackgroundTransparency = 0.3
+	m.Image = ""
+	m.Active = true
+	m.ZIndex = 5
+	m.Parent = gui
+	corner(m, 20)
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.new(1, 1, 1)
+	stroke.Thickness = 2
+	stroke.Parent = m
+	local num = Instance.new("TextLabel")
+	num.Size = UDim2.fromScale(1, 1)
+	num.BackgroundTransparency = 1
+	num.Font = FONT
+	num.TextSize = 18
+	num.TextColor3 = Color3.new(1, 1, 1)
+	num.Text = tostring(idx)
+	num.ZIndex = 6
+	num.Parent = m
+
+	local dragging, offset = false, Vector2.zero
+	m.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			offset = m.AbsolutePosition - Vector2.new(i.Position.X, i.Position.Y)
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local p = Vector2.new(i.Position.X, i.Position.Y) + offset
+			m.Position = UDim2.fromOffset(p.X, p.Y)
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	table.insert(markers, m)
+	refreshAddText()
+end
+
+local function removeMarker()
+	local m = table.remove(markers)
+	if m then
+		m:Destroy()
+	end
+	refreshAddText()
+end
+
+local function center(m)
+	return m.AbsolutePosition + m.AbsoluteSize / 2
+end
+
+-- ============ CLICK ============
+local function doClick(pos)
+	local hitInst, hitPos
+
+	-- 1) tombol GUI di posisi itu (GUI milik script ini diabaikan)
+	for _, o in ipairs(player.PlayerGui:GetGuiObjectsAtPosition(pos.X, pos.Y)) do
+		if not o:IsDescendantOf(gui) and o:IsA("GuiButton") then
+			if fireSignal then
+				pcall(fireSignal, o.MouseButton1Click)
+				pcall(fireSignal, o.Activated)
+			end
+			hitInst = o
+			break
+		end
+	end
+
+	-- 2) objek 3D di posisi itu
+	if not hitInst then
+		local ray = camera:ViewportPointToRay(pos.X, pos.Y)
+		local params = RaycastParams.new()
+		if player.Character then
+			params.FilterDescendantsInstances = { player.Character }
+		end
+		local res = workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+		if res then
+			hitInst, hitPos = res.Instance, res.Position
+			local cd = hitInst:FindFirstChildWhichIsA("ClickDetector", true)
+			local p = hitInst
+			while not cd and p and p ~= workspace do
+				cd = p:FindFirstChildWhichIsA("ClickDetector")
+				p = p.Parent
+			end
+			if cd and fireClickDetector then
+				pcall(fireClickDetector, cd)
+			end
+		end
+	end
+
+	-- 3) tool yang sedang dipegang
+	local tool = player.Character and player.Character:FindFirstChildOfClass("Tool")
+	if tool then
+		tool:Activate()
+		task.defer(function()
+			tool:Deactivate()
+		end)
+	end
+
+	-- 4) hook untuk script game kamu sendiri
+	clickEvent:Fire(pos, hitInst, hitPos)
+end
+
+-- ============ RUNNER ============
+local running = false
+local runId = 0
+local phase = nil -- Opsi 2: "wait2" | "wait1" | "busy"
+
+local function setRunning(on)
+	running = on
+	startBtn.Text = on and "STOP" or "START"
+	setBtnGradient(startBtn, on and GRAD.Danger or GRAD.Green)
+	if not on then
+		phase = nil
+	end
+end
+
+local function clickMarkers(id)
+	for n, m in ipairs(markers) do
+		for i = 1, config.clicks do
+			if not running or runId ~= id then
+				return false
+			end
+			status.Text = ("Klik penanda %d (%d/%d)"):format(n, i, config.clicks)
+			doClick(center(m))
+			task.wait(config.delay)
+		end
+	end
+	return true
+end
+
+local function startOption1()
+	runId += 1
+	local id = runId
+	task.spawn(function()
+		local r = 0
+		while running and runId == id do
+			r += 1
+			if not clickMarkers(id) then
+				return
+			end
+			if config.rounds ~= 0 and r >= config.rounds then
+				break
+			end
+		end
+		if runId == id then
+			setRunning(false)
+			status.Text = "Selesai."
+		end
+	end)
+end
+
+local function startOption2()
+	runId += 1
+	phase = "wait2"
+	status.Text = "Tekan [2] untuk klik semua penanda."
+end
+
+local function autoClickAtMouse(id)
+	local untilT = os.clock() + config.duration
+	while running and runId == id and os.clock() < untilT do
+		status.Text = ("Auto klik... sisa %.1fs"):format(math.max(0, untilT - os.clock()))
+		doClick(UIS:GetMouseLocation())
+		task.wait(config.delay)
+	end
+end
+
+UIS.InputBegan:Connect(function(input)
+	if not running or config.mode ~= 2 or UIS:GetFocusedTextBox() then
+		return
+	end
+	local k = input.KeyCode
+	local id = runId
+	if phase == "wait2" and (k == Enum.KeyCode.Two or k == Enum.KeyCode.KeypadTwo) then
+		phase = "busy"
+		task.spawn(function()
+			task.wait(0.25) -- beri waktu tool slot 2 ter-equip
+			if clickMarkers(id) and running and runId == id then
+				phase = "wait1"
+				status.Text = "Tekan [1] untuk auto klik " .. config.duration .. " detik."
+			end
+		end)
+	elseif phase == "wait1" and (k == Enum.KeyCode.One or k == Enum.KeyCode.KeypadOne) then
+		phase = "busy"
+		task.spawn(function()
+			task.wait(0.25) -- beri waktu tool slot 1 ter-equip
+			autoClickAtMouse(id)
+			if running and runId == id then
+				phase = "wait2"
+				status.Text = "Ulang: tekan [2] lagi (atau STOP)."
+			end
+		end)
+	end
+end)
+
+-- ============ BUTTONS ============
+modeBtn.MouseButton1Click:Connect(function()
+	if running then
+		return
+	end
+	config.mode = config.mode == 1 and 2 or 1
+	modeBtn.Text = config.mode == 1 and "Mode: Opsi 1 (Auto klik penanda)" or "Mode: Opsi 2 (Put & Click)"
+	roundsRow.Visible = config.mode == 1
+	durRow.Visible = config.mode == 2
+end)
+
+addBtn.MouseButton1Click:Connect(addMarker)
+delBtn.MouseButton1Click:Connect(function()
+	if not running then
+		removeMarker()
+	end
+end)
+
+startBtn.MouseButton1Click:Connect(function()
+	if running then
+		runId += 1
+		setRunning(false)
+		status.Text = "Dihentikan."
+		return
+	end
+	if #markers == 0 then
+		status.Text = "Tambah minimal 1 penanda dulu."
+		return
+	end
+	setRunning(true)
+	if config.mode == 1 then
+		startOption1()
+	else
+		startOption2()
+	end
+end)
